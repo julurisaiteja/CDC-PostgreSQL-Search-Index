@@ -4,43 +4,52 @@
     <meta charset="UTF-8" />
     <title>CDC Pipeline Dashboard</title>
     <style>
-      body {
-        font-family: Arial, sans-serif;
-        margin: 20px;
+      :root {
+        color-scheme: light;
+        --page: #f3f7f6;
+        --surface: #ffffff;
+        --ink: #172b2a;
+        --muted: #647875;
+        --line: #dce7e4;
+        --accent: #0f766e;
+        --accent-soft: #e6f4f1;
+        --live: #18a999;
+        --waiting: #d99a42;
       }
-      .container {
-        display: flex;
-        gap: 20px;
-      }
-      .column {
-        flex: 1;
-        border: 1px solid #ccc;
-        padding: 10px;
-      }
-      #live-indicator {
-        width: 10px;
-        height: 10px;
-        border-radius: 50%;
-        background-color: red;
-        display: inline-block;
-        margin-left: 8px;
-      }
-      .live {
-        background-color: green !important;
-      }
-      .cdc-event {
-        font-size: 12px;
-        border-bottom: 1px solid #eee;
-        padding: 4px 0;
+      * { box-sizing: border-box; }
+      body { font-family: Inter, ui-sans-serif, system-ui, sans-serif; margin: 0; min-height: 100vh; padding: 28px; background: var(--page); color: var(--ink); }
+      h1 { max-width: 1200px; margin: 0 auto 20px; font-size: 28px; line-height: 1.2; }
+      h2 { margin: 0 0 16px; font-size: 16px; }
+      h3 { margin: 24px 0 10px; font-size: 14px; }
+      .status-row { display: flex; align-items: center; gap: 8px; max-width: 1200px; margin: 0 auto 12px; color: var(--muted); font-size: 13px; }
+      #connection-label { color: var(--accent); font-weight: 700; }
+      .demo-notice { max-width: 1200px; margin: 0 auto 18px; padding: 10px 12px; border: 1px solid #d2e6df; border-radius: 7px; background: var(--accent-soft); color: var(--accent); font-size: 12px; }
+      .container { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; max-width: 1200px; margin: 0 auto; }
+      .column { min-width: 0; border: 1px solid var(--line); border-radius: 10px; padding: 20px; background: var(--surface); box-shadow: 0 8px 24px rgba(24, 54, 50, 0.05); }
+      input, select { min-height: 42px; border: 1px solid var(--line); border-radius: 7px; padding: 9px 12px; background: #fbfdfc; color: var(--ink); font: inherit; }
+      input:focus, select:focus { outline: 3px solid var(--accent-soft); border-color: var(--accent); }
+      #search-input { width: 100%; }
+      #live-indicator { width: 9px; height: 9px; border-radius: 50%; background: var(--waiting); display: inline-block; margin-left: 8px; }
+      .live { background: var(--live) !important; box-shadow: 0 0 0 4px var(--accent-soft); }
+      .cdc-event, .search-result { font-size: 12px; border-bottom: 1px solid var(--line); padding: 10px 0; color: var(--muted); }
+      .search-result strong { color: var(--ink); }
+      .search-result p { margin: 4px 0 0; }
+      @media (max-width: 700px) {
+        body { padding: 18px 14px; }
+        h1 { font-size: 23px; }
+        .container { grid-template-columns: 1fr; }
+        .column { padding: 16px; }
       }
     </style>
   </head>
   <body>
     <h1>CDC PostgreSQL → Search Index</h1>
-    <div>
-      Live CDC Status:
+    <div class="status-row">
+      <span id="status-label">Live CDC Status</span>
       <div id="live-indicator" data-testid="live-indicator"></div>
+      <span id="connection-label">Connecting</span>
     </div>
+    <p id="demo-notice" class="demo-notice" hidden>Demo mode: sample products and simulated CDC events. No live database connection.</p>
 
     <div class="container">
       <div class="column">
@@ -85,8 +94,51 @@
       const inStockToggle = document.getElementById("in-stock-toggle");
       const cdcFeed = document.getElementById("cdc-feed");
       const liveIndicator = document.getElementById("live-indicator");
+      const connectionLabel = document.getElementById("connection-label");
+      const demoNotice = document.getElementById("demo-notice");
+      const isStaticPreview = location.hostname.endsWith(".workers.dev") || location.hostname.endsWith(".pages.dev");
+      const demoProducts = [
+        { name: "NovaMesh Wi-Fi Router", category: "Electronics", price: 149, in_stock: true, quantity: 26 },
+        { name: "Field Notes: Systems Design", category: "Books", price: 32, in_stock: true, quantity: 84 },
+        { name: "Meridian Utility Jacket", category: "Clothing", price: 118, in_stock: false, quantity: 0 },
+        { name: "Arc Desk Lamp", category: "Home", price: 76, in_stock: true, quantity: 14 },
+        { name: "Ridgeway Trail Pack", category: "Sports", price: 94, in_stock: true, quantity: 8 },
+        { name: "Aster Noise-Cancel Headphones", category: "Electronics", price: 229, in_stock: true, quantity: 41 },
+      ];
+      const demoEvents = [
+        { table: "products", operation: "UPDATE" },
+        { table: "inventory", operation: "INSERT" },
+        { table: "products", operation: "INSERT" },
+        { table: "inventory", operation: "UPDATE" },
+      ];
 
       let searchTimeout = null;
+
+      function renderResults(hits) {
+        resultsContainer.replaceChildren();
+        hits.forEach((hit) => {
+          const result = document.createElement("div");
+          result.className = "search-result";
+          const name = document.createElement("strong");
+          name.textContent = hit.name;
+          const details = document.createElement("p");
+          details.textContent = `${hit.category || "N/A"} · $${hit.price} · ${hit.in_stock ? `In stock (${hit.quantity})` : "Out of stock"}`;
+          result.append(name, details);
+          resultsContainer.appendChild(result);
+        });
+      }
+
+      function searchDemoProducts() {
+        const query = searchInput.value.trim().toLowerCase();
+        const category = categoryFilter.value;
+        const hits = demoProducts.filter((product) => {
+          const matchesQuery = !query || `${product.name} ${product.category}`.toLowerCase().includes(query);
+          const matchesCategory = !category || product.category === category;
+          const matchesStock = !inStockToggle.checked || product.in_stock;
+          return matchesQuery && matchesCategory && matchesStock;
+        });
+        renderResults(hits);
+      }
 
       function debounceSearch() {
         if (searchTimeout) clearTimeout(searchTimeout);
@@ -94,6 +146,11 @@
       }
 
       async function runSearch() {
+        if (isStaticPreview) {
+          searchDemoProducts();
+          return;
+        }
+
         const q = searchInput.value;
         const category = categoryFilter.value;
         const inStock = inStockToggle.checked;
@@ -107,21 +164,10 @@
           const res = await fetch(`/api/search?${params.toString()}`);
           const data = await res.json();
 
-          resultsContainer.innerHTML = "";
-          (data.hits || []).forEach((hit) => {
-            const div = document.createElement("div");
-            div.style.borderBottom = "1px solid #eee";
-            div.style.padding = "4px 0";
-            div.innerHTML = `
-              <strong>${hit.name}</strong><br/>
-              Category: ${hit.category || "N/A"}<br/>
-              Price: ${hit.price}<br/>
-              In stock: ${hit.in_stock ? "Yes" : "No"} (qty: ${hit.quantity})
-            `;
-            resultsContainer.appendChild(div);
-          });
+          renderResults(data.hits || []);
         } catch (err) {
           console.error("Search error", err);
+          resultsContainer.textContent = "Search service unavailable. Try again when the API is connected.";
         }
       }
 
@@ -136,6 +182,20 @@
       }
 
       function initSSE() {
+        if (isStaticPreview) {
+          demoNotice.hidden = false;
+          document.getElementById("status-label").textContent = "CDC Preview";
+          connectionLabel.textContent = "Demo stream";
+          liveIndicator.classList.add("live");
+          demoEvents.forEach((event, index) => {
+            const row = document.createElement("div");
+            row.className = "cdc-event";
+            row.textContent = `SAMPLE · ${new Date(Date.now() - index * 11000).toLocaleTimeString()} · ${event.table} · ${event.operation}`;
+            cdcFeed.appendChild(row);
+          });
+          return;
+        }
+
         const es = new EventSource("/api/cdc-stream");
         es.addEventListener("cdc_event", (event) => {
           flashLiveIndicator();
